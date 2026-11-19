@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PeerJS connection test</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 560px; margin: 24px auto; padding: 0 16px; line-height: 1.4; }
+  button, input { font-size: 16px; padding: 8px 12px; margin: 4px 4px 4px 0; }
+  #log { background: #111; color: #ddd; padding: 12px; border-radius: 8px; height: 260px; overflow-y: auto; font-family: monospace; font-size: 13px; white-space: pre-wrap; }
+  .ok { color: #6f6; } .bad { color: #f66; } .info { color: #8cf; }
+  #code { font-size: 28px; font-weight: bold; letter-spacing: 2px; }
+</style>
+</head>
+<body>
+<h2>PeerJS connection test</h2>
+<p>Open this file on two devices (e.g. work laptop + phone on mobile data). Click <b>Host</b> on one, type its code on the other and click <b>Join</b>.</p>
+
+<div>
+  <button id="hostBtn">Host</button>
+  <span id="code"></span>
+</div>
+<div>
+  <input id="joinCode" placeholder="Code to join" size="12">
+  <button id="joinBtn">Join</button>
+</div>
+<div>
+  <input id="msg" placeholder="Message" size="22" disabled>
+  <button id="sendBtn" disabled>Send</button>
+</div>
+
+<h3>Log</h3>
+<div id="log"></div>
+
+<script>
+const logEl = document.getElementById('log');
+function log(text, cls) {
+  const line = document.createElement('div');
+  line.className = cls || '';
+  line.textContent = new Date().toLocaleTimeString() + '  ' + text;
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src; s.onload = resolve; s.onerror = reject;
+    document.head.appendChild(s);
+  });
+}
+
+let peer, conn;
+
+async function ensurePeerJS() {
+  if (window.Peer) return true;
+  const urls = [
+    'https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js',
+    'https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js'
+  ];
+  for (const u of urls) {
+    try { await loadScript(u); log('Loaded PeerJS library from ' + new URL(u).host, 'ok'); return true; }
+    catch (e) { log('Could not load library from ' + new URL(u).host, 'bad'); }
+  }
+  log('FAIL: PeerJS library blocked. Your network blocks the script hosts.', 'bad');
+  return false;
+}
+
+function setupConn(c) {
+  conn = c;
+  c.on('open', async () => {
+    log('CONNECTED to the other device. WebRTC works on this network.', 'ok');
+    document.getElementById('msg').disabled = false;
+    document.getElementById('sendBtn').disabled = false;
+    reportPath(c);
+  });
+  c.on('data', d => log('Received: ' + d, 'info'));
+  c.on('close', () => log('Connection closed', 'bad'));
+  c.on('error', e => log('Connection error: ' + e, 'bad'));
+}
+
+async function reportPath(c) {
+  try {
+    const stats = await c.peerConnection.getStats();
+    const byId = {};
+    stats.forEach(r => byId[r.id] = r);
+    stats.forEach(r => {
+      if (r.type === 'candidate-pair' && r.nominated && r.state === 'succeeded') {
+        const local = byId[r.localCandidateId];
+        const remote = byId[r.remoteCandidateId];
+        const t = (local && local.candidateType) + ' / ' + (remote && remote.candidateType);
+        log('Connection path (local/remote): ' + t + '  [relay = went through a relay server, still fine]', 'info');
+      }
+    });
+  } catch (e) { /* not critical */ }
+}
+
+function newPeer(id) {
+  return new Promise((resolve, reject) => {
+    const p = id ? new Peer(id) : new Peer();
+    const timer = setTimeout(() => reject(new Error('timeout reaching the PeerJS signaling server (10s)')), 10000);
+    p.on('open', pid => { clearTimeout(timer); resolve(p); });
+    p.on('error', e => { clearTimeout(timer); log('Peer error: ' + e.type + ' ' + e.message, 'bad'); reject(e); });
+  });
+}
+
+document.getElementById('hostBtn').onclick = async () => {
+  if (!(await ensurePeerJS())) return;
+  const code = String(Math.floor(1000 + Math.random() * 9000));
+  log('Contacting PeerJS signaling server...');
+  try {
+    peer = await newPeer('sumotest-' + code);
+  } catch (e) { log('FAIL: ' + (e.message || e.type), 'bad'); return; }
+  document.getElementById('code').textContent = code;
+  log('Hosting. Give the code ' + code + ' to the other device and wait.', 'ok');
+  peer.on('connection', setupConn);
+};
+
+document.getElementById('joinBtn').onclick = async () => {
+  const code = document.getElementById('joinCode').value.trim();
+  if (!code) return log('Type the code first', 'bad');
+  if (!(await ensurePeerJS())) return;
+  log('Contacting PeerJS signaling server...');
+  try {
+    peer = await newPeer();
+  } catch (e) { log('FAIL: ' + (e.message || e.type), 'bad'); return; }
+  log('Signaling server reached. Connecting to host ' + code + '...');
+  const c = peer.connect('sumotest-' + code, { reliable: true });
+  setupConn(c);
+  setTimeout(() => { if (!c.open) log('Still not connected after 15s. Direct connection is probably blocked.', 'bad'); }, 15000);
+};
+
+document.getElementById('sendBtn').onclick = () => {
+  const el = document.getElementById('msg');
+  if (conn && conn.open && el.value) { conn.send(el.value); log('Sent: ' + el.value); el.value = ''; }
+};
+</script>
+</body>
+</html>
